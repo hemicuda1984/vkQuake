@@ -132,12 +132,45 @@ typedef struct
 
 #ifdef D3D12_ENABLED
     ID3D12CommandQueue*                 d3d12_queue;
-    ID3D12CommandList*                  d3d12_command_list;
+    ID3D12GraphicsCommandList*          d3d12_command_list;
     ID3D12PipelineState*                d3d12_current_pipeline;
     DXGI_FORMAT                         dxgi_swap_chain_format;
     DXGI_FORMAT                         dxgi_color_format;
     DXGI_FORMAT                         dxgi_depth_format;
     DXGI_SAMPLE_DESC                    dxgi_sample_desc;
+
+    ID3D12Resource*                     d3d12_color_buffers[NUM_COLOR_BUFFERS];
+    ID3D12Resource*                     d3d12_fan_index_buffer;
+
+    ID3D12PipelineState*                d3d12_basic_alphatest_pipeline[2];
+    ID3D12PipelineState*                d3d12_basic_blend_pipeline[2];
+    ID3D12PipelineState*                d3d12_basic_notex_blend_pipeline[2];
+    ID3D12PipelineState*                d3d12_basic_poly_blend_pipeline;
+    ID3D12RootSignature*                d3d12_basic_pipeline_layout;
+    ID3D12PipelineState*                d3d12_world_pipelines[WORLD_PIPELINE_COUNT];
+    ID3D12RootSignature*                d3d12_world_pipeline_layout;
+    ID3D12PipelineState*                d3d12_water_pipeline;
+    ID3D12PipelineState*                d3d12_water_blend_pipeline;
+    ID3D12PipelineState*                d3d12_raster_tex_warp_pipeline;
+    ID3D12PipelineState*                d3d12_particle_pipeline;
+    ID3D12PipelineState*                d3d12_sprite_pipeline;
+    ID3D12PipelineState*                d3d12_sky_color_pipeline;
+    ID3D12PipelineState*                d3d12_sky_box_pipeline;
+    ID3D12PipelineState*                d3d12_sky_layer_pipeline;
+    ID3D12RootSignature*                d3d12_sky_layer_pipeline_layout;
+    ID3D12PipelineState*                d3d12_alias_pipeline;
+    ID3D12PipelineState*                d3d12_alias_blend_pipeline;
+    ID3D12PipelineState*                d3d12_alias_alphatest_pipeline;
+    ID3D12RootSignature*                d3d12_alias_pipeline_layout;
+    ID3D12PipelineState*                d3d12_postprocess_pipeline;
+    ID3D12RootSignature*                d3d12_postprocess_pipeline_layout;
+    ID3D12PipelineState*                d3d12_screen_warp_pipeline;
+    ID3D12RootSignature*                d3d12_screen_warp_pipeline_layout;
+    ID3D12PipelineState*                d3d12_cs_tex_warp_pipeline;
+    ID3D12RootSignature*                d3d12_cs_tex_warp_pipeline_layout;
+    ID3D12PipelineState*                d3d12_showtris_pipeline;
+    ID3D12PipelineState*                d3d12_showtris_depth_test_pipeline;
+    ID3D12RootSignature*                d3d12_showtris_pipeline_layout;
 #endif
 
 	// Extensions

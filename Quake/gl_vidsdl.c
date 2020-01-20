@@ -185,26 +185,33 @@ typedef struct {
     D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle;
 } descriptor_heap_data;
 
-ID3D12Device * d3d12_device = NULL;
-ID3D12Debug * d3d12_debug = NULL;
-ID3D12CommandQueue * d3d12_queue = NULL;
-IDXGIFactory4 * dxgi_factory = NULL;
-IDXGISwapChain3 * dxgi_swap_chain = NULL;
-static uint32_t dxgi_num_swap_chain_images = 2;
-ID3D12CommandAllocator * d3d12_commandallocator = NULL;
-ID3D12CommandList * d3d12_commandlists[NUM_COMMAND_BUFFERS] = {NULL, NULL};
-ID3D12Fence * d3d12_fences[NUM_COMMAND_BUFFERS] = { NULL, NULL };
-ID3D12Resource * d3d12_depth_buffer = NULL;
+ID3D12Device *                      d3d12_device = NULL;
+ID3D12Debug *                       d3d12_debug = NULL;
+ID3D12CommandQueue *                d3d12_queue = NULL;
+IDXGIFactory4 *                     dxgi_factory = NULL;
+IDXGISwapChain3 *                   dxgi_swap_chain = NULL;
+static uint32_t                     dxgi_num_swap_chain_images = 2;
+ID3D12CommandAllocator *            d3d12_commandallocators[NUM_COMMAND_BUFFERS] = { NULL , NULL };
+ID3D12GraphicsCommandList *         d3d12_commandlists[NUM_COMMAND_BUFFERS] = {NULL, NULL};
+ID3D12Fence *                       d3d12_fences[NUM_COMMAND_BUFFERS] = { NULL, NULL };
+uint64_t                            d3d12_fences_last_value[NUM_COMMAND_BUFFERS];
+ID3D12Resource *                    d3d12_depth_buffer = NULL;
 
-UINT d3d12_heap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES];
+UINT                                d3d12_dheap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES];
 
-descriptor_heap_data d3d12_dheap_main_framebuffers;
-descriptor_heap_data d3d12_dheap_ui_framebuffers;
-descriptor_heap_data d3d12_dheap_depth_buffer_heap;
+descriptor_heap_data                d3d12_dheap_swapchain_image_views;
+ID3D12Resource*						d3d12_swapchain_images[MAX_SWAP_CHAIN_IMAGES];
+D3D12_CPU_DESCRIPTOR_HANDLE         d3d12_swapchain_images_views[MAX_SWAP_CHAIN_IMAGES];
+descriptor_heap_data                d3d12_dheap_depth_buffer_heap;
+D3D12_CPU_DESCRIPTOR_HANDLE         d3d12_depth_buffer_view;
+
+descriptor_heap_data                d3d12_dheap_color_buffer_heap;
+D3D12_CPU_DESCRIPTOR_HANDLE         d3d12_color_buffers_view[NUM_COLOR_BUFFERS];
 #endif
 
 // Swap chain
 static uint32_t current_swapchain_buffer;
+static uint32_t d3d12_current_swapchain_buffer;
 
 #define GET_INSTANCE_PROC_ADDR(inst, entrypoint) { \
 	fp##entrypoint = (PFN_vk##entrypoint)fpGetInstanceProcAddr(inst, "vk" #entrypoint); \
@@ -1050,6 +1057,24 @@ static void GL_InitCommandBuffers( void )
 		semaphore_create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 		err = vkCreateSemaphore(vulkan_globals.device, &semaphore_create_info, NULL, &draw_complete_semaphores[i]);
 	}
+
+#ifdef D3D12_ENABLED
+    for (i = 0; i < NUM_COMMAND_BUFFERS; ++i)
+    {
+        if (FAILED(d3d12_device->lpVtbl->CreateCommandAllocator(d3d12_device, D3D12_COMMAND_LIST_TYPE_DIRECT, &IID_ID3D12CommandAllocator, (void**) &d3d12_commandallocators[i])))
+            Sys_Error("CreateCommandAllocator failed");
+
+        if (FAILED(d3d12_device->lpVtbl->CreateCommandList(d3d12_device, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, d3d12_commandallocators[i], NULL, &IID_ID3D12CommandList, (void**)&d3d12_commandlists[i])))
+            Sys_Error("CreateCommandList failed");
+        d3d12_commandlists[i]->lpVtbl->Close(d3d12_commandlists[i]);
+
+        if (FAILED(d3d12_device->lpVtbl->CreateFence(d3d12_device, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void**)&d3d12_fences[i])))
+            Sys_Error("CreateFence failed");
+
+        d3d12_fences_last_value[i] = 0;
+    }
+
+#endif
 }
 
 /*
@@ -1330,7 +1355,8 @@ static void GL_CreateDepthBuffer( void )
 
     CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1, &d3d12_dheap_depth_buffer_heap);
 
-    d3d12_device->lpVtbl->CreateDepthStencilView(d3d12_device, d3d12_depth_buffer, NULL, d3d12_dheap_depth_buffer_heap.cpu_handle);
+    d3d12_depth_buffer_view = d3d12_dheap_depth_buffer_heap.cpu_handle;
+    d3d12_device->lpVtbl->CreateDepthStencilView(d3d12_device, d3d12_depth_buffer, NULL, d3d12_depth_buffer_view);
 #endif
 }
 
@@ -1360,6 +1386,27 @@ static void GL_CreateColorBuffer( void )
 	image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
 	image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
 	image_create_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+
+#ifdef D3D12_ENABLED
+    D3D12_HEAP_PROPERTIES heap_properties;
+    memset(&heap_properties, 0, sizeof(heap_properties));
+    heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC resource_desc;
+    memset(&resource_desc, 0, sizeof(resource_desc));
+
+    resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    resource_desc.Width = vid.width;
+    resource_desc.Height = vid.height;
+    resource_desc.DepthOrArraySize = 1;
+    resource_desc.MipLevels = 1;
+    resource_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; // TODO: check if available
+    resource_desc.SampleDesc.Count = 1;
+    resource_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    resource_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+    CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, NUM_COLOR_BUFFERS, &d3d12_dheap_color_buffer_heap);
+#endif
 
 	for (i = 0; i < NUM_COLOR_BUFFERS; ++i)
 	{
@@ -1418,6 +1465,15 @@ static void GL_CreateColorBuffer( void )
 			Sys_Error("vkCreateImageView failed");
 
 		GL_SetObjectName((uint64_t)color_buffers_view[i], VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT, va("Color Buffer View %d", i));
+
+#ifdef D3D12_ENABLED
+        if (FAILED(d3d12_device->lpVtbl->CreateCommittedResource(d3d12_device, &heap_properties, D3D12_HEAP_FLAG_NONE, &resource_desc, D3D12_RESOURCE_STATE_RENDER_TARGET, NULL, &IID_ID3D12Resource, &vulkan_globals.d3d12_color_buffers[i])))
+            Sys_Error("CreateCommittedResource failed");
+
+        d3d12_color_buffers_view[i] = d3d12_dheap_color_buffer_heap.cpu_handle;
+        d3d12_color_buffers_view[i].ptr += i * d3d12_dheap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_RTV];
+        d3d12_device->lpVtbl->CreateRenderTargetView(d3d12_device, vulkan_globals.d3d12_color_buffers[i], NULL, d3d12_color_buffers_view[i]);
+#endif
 	}
 
 	vulkan_globals.sample_count = VK_SAMPLE_COUNT_1_BIT;
@@ -1523,6 +1579,8 @@ static void GL_CreateColorBuffer( void )
 	}
 	else
 		Con_Printf("AA disabled\n");
+
+
 }
 
 /*
@@ -1762,6 +1820,8 @@ static qboolean GL_CreateSwapChain( void )
     if (hr != S_OK)
         Sys_Error("CreateCommandQueue failed");
 
+    vulkan_globals.d3d12_queue = d3d12_queue;
+
     SDL_SysWMinfo wminfo2;
     SDL_VERSION(&wminfo2.version);
     if (!SDL_GetWindowWMInfo(draw_context_2, &wminfo2))
@@ -1855,28 +1915,23 @@ static void GL_CreateFrameBuffers( void )
     descriptor_heap_desc.NumDescriptors = dxgi_num_swap_chain_images;
     ID3D12Resource * back_buffer;
 
-    CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, dxgi_num_swap_chain_images, &d3d12_dheap_main_framebuffers);
-    CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, dxgi_num_swap_chain_images, &d3d12_dheap_ui_framebuffers);
+    CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, dxgi_num_swap_chain_images, &d3d12_dheap_swapchain_image_views);
 
     for (i = 0; i < D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES; ++i) {
-        d3d12_heap_increment_size[i] = d3d12_device->lpVtbl->GetDescriptorHandleIncrementSize(d3d12_device, i);
+        d3d12_dheap_increment_size[i] = d3d12_device->lpVtbl->GetDescriptorHandleIncrementSize(d3d12_device, i);
     }
 
     for (i = 0; i < dxgi_num_swap_chain_images; ++i) {
         if (FAILED(dxgi_swap_chain->lpVtbl->GetBuffer(dxgi_swap_chain, i, &IID_ID3D12Resource, (void**)&back_buffer)))
             Sys_Error("GetBuffer failed");
 
+        d3d12_swapchain_images[i] = back_buffer;
+
         D3D12_CPU_DESCRIPTOR_HANDLE target;
 
-        target = d3d12_dheap_main_framebuffers.cpu_handle;
-        target.ptr += i * d3d12_heap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_RTV];
-        d3d12_device->lpVtbl->CreateRenderTargetView(d3d12_device, back_buffer, NULL, target);
-
-        target = d3d12_dheap_ui_framebuffers.cpu_handle;
-        target.ptr += i * d3d12_heap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_RTV];
-        d3d12_device->lpVtbl->CreateRenderTargetView(d3d12_device, back_buffer, NULL, target);
-
-        back_buffer->lpVtbl->Release(back_buffer);
+        d3d12_swapchain_images_views[i] = d3d12_dheap_swapchain_image_views.cpu_handle;
+        d3d12_swapchain_images_views[i].ptr += i * d3d12_dheap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_RTV];
+        d3d12_device->lpVtbl->CreateRenderTargetView(d3d12_device, back_buffer, NULL, d3d12_swapchain_images_views[i]);
     }
 #endif
 }
@@ -2021,6 +2076,12 @@ qboolean GL_BeginRendering (int *x, int *y, int *width, int *height)
 		err = vkWaitForFences(vulkan_globals.device, 1, &command_buffer_fences[current_command_buffer], VK_TRUE, UINT64_MAX);
 		if (err != VK_SUCCESS)
 			Sys_Error("vkWaitForFences failed");
+#ifdef D3D12_ENABLED
+        while (d3d12_fences[current_command_buffer]->lpVtbl->GetCompletedValue(d3d12_fences[current_command_buffer]) < d3d12_fences_last_value[current_command_buffer])
+        { 
+            // TODO: use the event instead
+        }
+#endif
 	}
 
 	err = vkResetFences(vulkan_globals.device, 1, &command_buffer_fences[current_command_buffer]);
@@ -2080,6 +2141,20 @@ qboolean GL_BeginRendering (int *x, int *y, int *width, int *height)
 
 	GL_SetCanvas(CANVAS_NONE);
 
+#ifdef D3D12_ENABLED
+    vulkan_globals.d3d12_command_list = d3d12_commandlists[current_command_buffer];
+    vulkan_globals.d3d12_command_list->lpVtbl->Reset(vulkan_globals.d3d12_command_list, d3d12_commandallocators[current_command_buffer], NULL);
+
+    D3D12_VIEWPORT d3d12_viewport;
+    d3d12_viewport.TopLeftX = 0.0f;
+    d3d12_viewport.TopLeftY = 0.0f;
+    d3d12_viewport.Width = vid.width;
+    d3d12_viewport.Height = vid.height;
+    d3d12_viewport.MinDepth = 0.0f;
+    d3d12_viewport.MaxDepth = 1.0f;
+    vulkan_globals.d3d12_command_list->lpVtbl->RSSetViewports(vulkan_globals.d3d12_command_list, 1, &d3d12_viewport);
+#endif
+
 	return true;
 }
 
@@ -2115,6 +2190,10 @@ qboolean GL_AcquireNextSwapChainImage(void)
 	vulkan_globals.ui_render_pass_begin_info.renderPass = vulkan_globals.ui_render_pass;
 	vulkan_globals.ui_render_pass_begin_info.framebuffer = ui_framebuffers[current_swapchain_buffer];
 	vulkan_globals.ui_render_pass_begin_info.clearValueCount = 0;
+
+#ifdef D3D12_ENABLED
+    d3d12_current_swapchain_buffer = dxgi_swap_chain->lpVtbl->GetCurrentBackBufferIndex(dxgi_swap_chain);
+#endif
 
 	return true;
 }
@@ -2185,6 +2264,21 @@ void GL_EndRendering (qboolean swapchain_acquired)
 		else if (err != VK_SUCCESS)
 			Sys_Error("vkQueuePresentKHR failed");
 	}
+
+#ifdef D3D12_ENABLED
+    // TODO: post process pass
+
+    vulkan_globals.d3d12_command_list->lpVtbl->Close(vulkan_globals.d3d12_command_list);
+    vulkan_globals.d3d12_queue->lpVtbl->ExecuteCommandLists(vulkan_globals.d3d12_queue, 1, &vulkan_globals.d3d12_command_list);
+    d3d12_fences_last_value[current_command_buffer]++;
+    vulkan_globals.d3d12_queue->lpVtbl->Signal(vulkan_globals.d3d12_queue, d3d12_fences[current_command_buffer], d3d12_fences_last_value[current_command_buffer]);
+
+    HRESULT hr = dxgi_swap_chain->lpVtbl->Present(dxgi_swap_chain, 0, 0);
+    if (FAILED(hr))
+    {
+        Sys_Error("Present failed");
+    }
+#endif
 
 	command_buffer_submitted[current_command_buffer] = true;
 	current_command_buffer = (current_command_buffer + 1) % NUM_COMMAND_BUFFERS;

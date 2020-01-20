@@ -72,6 +72,10 @@ void GL_DestroyHeap(glheap_t * heap)
 	vkFreeMemory(vulkan_globals.device, heap->memory, NULL);
 	free(heap->head);
 	free(heap);
+
+#ifdef D3D12_ENABLED
+    //vulkan_globals.d3d12_queue->lpVtbl->
+#endif
 }
 
 /*
