@@ -33,6 +33,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "SDL_vulkan.h"
 
 #ifdef D3D12_ENABLED
+#define COBJMACROS 1
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #endif
@@ -178,13 +179,28 @@ VkBool32 debug_message_callback(VkDebugReportFlagsEXT flags, VkDebugReportObject
 #endif
 
 #ifdef D3D12_ENABLED
+typedef struct {
+    ID3D12DescriptorHeap * descriptor_heap;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle;
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle;
+} descriptor_heap_data;
+
 ID3D12Device * d3d12_device = NULL;
 ID3D12Debug * d3d12_debug = NULL;
 ID3D12CommandQueue * d3d12_queue = NULL;
 IDXGIFactory4 * dxgi_factory = NULL;
 IDXGISwapChain3 * dxgi_swap_chain = NULL;
+static uint32_t dxgi_num_swap_chain_images = 2;
 ID3D12CommandAllocator * d3d12_commandallocator = NULL;
 ID3D12CommandList * d3d12_commandlists[NUM_COMMAND_BUFFERS] = {NULL, NULL};
+ID3D12Fence * d3d12_fences[NUM_COMMAND_BUFFERS] = { NULL, NULL };
+ID3D12Resource * d3d12_depth_buffer = NULL;
+
+UINT d3d12_heap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES];
+
+descriptor_heap_data d3d12_dheap_main_framebuffers;
+descriptor_heap_data d3d12_dheap_ui_framebuffers;
+descriptor_heap_data d3d12_dheap_depth_buffer_heap;
 #endif
 
 // Swap chain
@@ -412,11 +428,9 @@ static qboolean VID_SetMode (int width, int height, int refreshrate, int bpp, qb
 	Uint32	flags;
 	char		caption[50];
 	int		previous_display;
-	
-    MessageBox(0, 0, 0, 0);
 
 	// so Con_Printfs don't mess us up by forcing vid and snd updates
-	temp = scr_disabled_for_loading;
+ 	temp = scr_disabled_for_loading;
 	scr_disabled_for_loading = true;
 
 	CDAudio_Pause ();
@@ -601,6 +615,36 @@ void VID_Lock (void)
 
 //==============================================================================
 //
+//  D3D12 Stuff
+//
+//==============================================================================
+
+void CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE type, UINT descriptor_count, descriptor_heap_data * out_data)
+{
+    HRESULT hr;
+    D3D12_DESCRIPTOR_HEAP_DESC descriptor_heap_desc;
+    memset(&descriptor_heap_desc, 0, sizeof(descriptor_heap_desc));
+    descriptor_heap_desc.Type = type;
+    descriptor_heap_desc.NumDescriptors = descriptor_count;
+
+    hr = d3d12_device->lpVtbl->CreateDescriptorHeap(d3d12_device, &descriptor_heap_desc, &IID_ID3D12DescriptorHeap, (void**) &out_data->descriptor_heap);
+    if (FAILED(hr))
+        Sys_Error("CreateDescriptorHeap failed");
+
+    // #thankMicrosoft
+    // see https://stackoverflow.com/questions/34118929/getcpudescriptorhandleforheapstart-stack-corruption
+    typedef void(STDMETHODCALLTYPE * realGetCPUDescriptorHandleForHeapStart)(ID3D12DescriptorHeap *, D3D12_CPU_DESCRIPTOR_HANDLE*);
+    typedef void(STDMETHODCALLTYPE * realGetGPUDescriptorHandleForHeapStart)(ID3D12DescriptorHeap *, D3D12_GPU_DESCRIPTOR_HANDLE*);
+
+    realGetCPUDescriptorHandleForHeapStart pfnGetCPUDescriptorHandleForHeapStart = (realGetCPUDescriptorHandleForHeapStart) out_data->descriptor_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart;
+    realGetGPUDescriptorHandleForHeapStart pfnGetGPUDescriptorHandleForHeapStart = (realGetGPUDescriptorHandleForHeapStart) out_data->descriptor_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart;
+
+    pfnGetCPUDescriptorHandleForHeapStart(out_data->descriptor_heap, &out_data->cpu_handle);
+    pfnGetGPUDescriptorHandleForHeapStart(out_data->descriptor_heap, &out_data->gpu_handle);
+}
+
+//==============================================================================
+//
 //	Vulkan Stuff
 //
 //==============================================================================
@@ -712,15 +756,15 @@ static void GL_InitInstance( void )
 #ifdef D3D12_ENABLED
     HRESULT hr;
 
-    hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void**) &d3d12_device);
-    if (hr != S_OK)
-        Sys_Error("Couldn't create D3D12 device");
-
 #ifdef _DEBUG
-    hr = d3d12_device->lpVtbl->QueryInterface(d3d12_device, &IID_ID3D12Debug, (void**) &d3d12_debug);
+    hr = D3D12GetDebugInterface(&IID_ID3D12Debug, (void**) &d3d12_debug);
     if (SUCCEEDED(hr))
         d3d12_debug->lpVtbl->EnableDebugLayer(d3d12_debug);
 #endif
+
+    hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void**) &d3d12_device);
+    if (hr != S_OK)
+        Sys_Error("Couldn't create D3D12 device");
 
     hr = CreateDXGIFactory(&IID_IDXGIFactory4, (void**) &dxgi_factory);
     if (hr != S_OK)
@@ -1262,6 +1306,32 @@ static void GL_CreateDepthBuffer( void )
 		Sys_Error("vkCreateImageView failed");
 
 	GL_SetObjectName((uint64_t)depth_buffer_view, VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_VIEW_EXT, "Depth Buffer View");
+
+#ifdef D3D12_ENABLED
+    D3D12_HEAP_PROPERTIES heap_properties;
+    memset(&heap_properties, 0, sizeof(heap_properties));
+    heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC resource_desc;
+    memset(&resource_desc, 0, sizeof(resource_desc));
+
+    resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    resource_desc.Width = vid.width;
+    resource_desc.Height = vid.height;
+    resource_desc.DepthOrArraySize = 1;
+    resource_desc.MipLevels = 1;
+    resource_desc.Format = DXGI_FORMAT_D32_FLOAT;
+    resource_desc.SampleDesc.Count = 1;
+    resource_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    resource_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+    if (FAILED(d3d12_device->lpVtbl->CreateCommittedResource(d3d12_device, &heap_properties, D3D12_HEAP_FLAG_NONE, &resource_desc, D3D12_RESOURCE_STATE_DEPTH_WRITE, NULL, &IID_ID3D12Resource, &d3d12_depth_buffer)))
+        Sys_Error("Unable to create depth buffer resource");
+
+    CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1, &d3d12_dheap_depth_buffer_heap);
+
+    d3d12_device->lpVtbl->CreateDepthStencilView(d3d12_device, d3d12_depth_buffer, NULL, d3d12_dheap_depth_buffer_heap.cpu_handle);
+#endif
 }
 
 /*
@@ -1693,9 +1763,6 @@ static qboolean GL_CreateSwapChain( void )
         Sys_Error("CreateCommandQueue failed");
 
     SDL_SysWMinfo wminfo2;
-    HWND hwnd;
-    void * secondWindow = VID_GetWindow2();
-
     SDL_VERSION(&wminfo2.version);
     if (!SDL_GetWindowWMInfo(draw_context_2, &wminfo2))
         Sys_Error("Couldn't get window wm info: %s", SDL_GetError());
@@ -1709,15 +1776,13 @@ static qboolean GL_CreateSwapChain( void )
     dxgi_swap_chain_desc1.SampleDesc.Count = 1;
     dxgi_swap_chain_desc1.SampleDesc.Quality = 0;
     dxgi_swap_chain_desc1.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    dxgi_swap_chain_desc1.BufferCount = 2;
+    dxgi_swap_chain_desc1.BufferCount = dxgi_num_swap_chain_images;
     dxgi_swap_chain_desc1.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
 
     hr = dxgi_factory->lpVtbl->CreateSwapChainForHwnd(dxgi_factory, d3d12_queue, wminfo2.info.win.window, &dxgi_swap_chain_desc1, NULL, NULL, (void**) &dxgi_swap_chain);
-    //hr = dxgi_factory->lpVtbl->CreateSwapChainForComposition(dxgi_factory, d3d12_queue, &dxgi_swap_chain_desc1, NULL, (void**) &dxgi_swap_chain);
     if (hr != S_OK)
         Sys_Error("CreateSwapChainForHwnd failed");
 #endif
-
 
 	return true;
 }
@@ -1781,6 +1846,39 @@ static void GL_CreateFrameBuffers( void )
 
 		GL_SetObjectName((uint64_t)ui_framebuffers[i], VK_DEBUG_REPORT_OBJECT_TYPE_FRAMEBUFFER_EXT, "ui");
 	}
+
+#ifdef D3D12_ENABLED
+    HRESULT hr;
+    D3D12_DESCRIPTOR_HEAP_DESC descriptor_heap_desc;
+    memset(&descriptor_heap_desc, 0, sizeof(descriptor_heap_desc));
+    descriptor_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    descriptor_heap_desc.NumDescriptors = dxgi_num_swap_chain_images;
+    ID3D12Resource * back_buffer;
+
+    CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, dxgi_num_swap_chain_images, &d3d12_dheap_main_framebuffers);
+    CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, dxgi_num_swap_chain_images, &d3d12_dheap_ui_framebuffers);
+
+    for (i = 0; i < D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES; ++i) {
+        d3d12_heap_increment_size[i] = d3d12_device->lpVtbl->GetDescriptorHandleIncrementSize(d3d12_device, i);
+    }
+
+    for (i = 0; i < dxgi_num_swap_chain_images; ++i) {
+        if (FAILED(dxgi_swap_chain->lpVtbl->GetBuffer(dxgi_swap_chain, i, &IID_ID3D12Resource, (void**)&back_buffer)))
+            Sys_Error("GetBuffer failed");
+
+        D3D12_CPU_DESCRIPTOR_HANDLE target;
+
+        target = d3d12_dheap_main_framebuffers.cpu_handle;
+        target.ptr += i * d3d12_heap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_RTV];
+        d3d12_device->lpVtbl->CreateRenderTargetView(d3d12_device, back_buffer, NULL, target);
+
+        target = d3d12_dheap_ui_framebuffers.cpu_handle;
+        target.ptr += i * d3d12_heap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_RTV];
+        d3d12_device->lpVtbl->CreateRenderTargetView(d3d12_device, back_buffer, NULL, target);
+
+        back_buffer->lpVtbl->Release(back_buffer);
+    }
+#endif
 }
 
 /*
