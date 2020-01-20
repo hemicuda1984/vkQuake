@@ -32,6 +32,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "SDL_syswm.h"
 #include "SDL_vulkan.h"
 
+#ifdef D3D12_ENABLED
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#endif
+
 #include <assert.h>
 
 #define MAX_MODE_LIST	600 //johnfitz -- was 30
@@ -61,6 +66,7 @@ static int		nummodes;
 static qboolean	vid_initialized = false;
 
 static SDL_Window	*draw_context;
+static SDL_Window	*draw_context_2; //D3D12
 static SDL_SysWMinfo sys_wm_info;
 
 static qboolean	vid_locked = false; //johnfitz
@@ -169,6 +175,16 @@ VkBool32 debug_message_callback(VkDebugReportFlagsEXT flags, VkDebugReportObject
 
 	return VK_FALSE;
 }
+#endif
+
+#ifdef D3D12_ENABLED
+ID3D12Device * d3d12_device = NULL;
+ID3D12Debug * d3d12_debug = NULL;
+ID3D12CommandQueue * d3d12_queue = NULL;
+IDXGIFactory4 * dxgi_factory = NULL;
+IDXGISwapChain3 * dxgi_swap_chain = NULL;
+ID3D12CommandAllocator * d3d12_commandallocator = NULL;
+ID3D12CommandList * d3d12_commandlists[NUM_COMMAND_BUFFERS] = {NULL, NULL};
 #endif
 
 // Swap chain
@@ -294,6 +310,11 @@ void *VID_GetWindow (void)
 	return draw_context;
 }
 
+void *VID_GetWindow2(void)
+{
+    return draw_context_2;
+}
+
 /*
 ====================
 VID_HasMouseOrInputFocus
@@ -392,6 +413,8 @@ static qboolean VID_SetMode (int width, int height, int refreshrate, int bpp, qb
 	char		caption[50];
 	int		previous_display;
 	
+    MessageBox(0, 0, 0, 0);
+
 	// so Con_Printfs don't mess us up by forcing vid and snd updates
 	temp = scr_disabled_for_loading;
 	scr_disabled_for_loading = true;
@@ -417,6 +440,15 @@ static qboolean VID_SetMode (int width, int height, int refreshrate, int bpp, qb
 		if(!SDL_GetWindowWMInfo(draw_context,&sys_wm_info))
 			Sys_Error ("Couldn't get window wm info: %s", SDL_GetError());
 
+        // Secondary window
+        draw_context_2 = SDL_CreateWindow(caption, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width, height, SDL_WINDOW_HIDDEN);
+        if (!draw_context_2)
+            Sys_Error("Couldn't create window: %s", SDL_GetError());
+
+        SDL_VERSION(&sys_wm_info.version);
+        if (!SDL_GetWindowWMInfo(draw_context_2, &sys_wm_info))
+            Sys_Error("Couldn't get window wm info: %s", SDL_GetError());
+
 		previous_display = -1;
 	}
 	else
@@ -440,6 +472,15 @@ static qboolean VID_SetMode (int width, int height, int refreshrate, int bpp, qb
 	SDL_SetWindowDisplayMode (draw_context, VID_SDL2_GetDisplayMode(width, height, refreshrate, bpp));
 	SDL_SetWindowBordered (draw_context, vid_borderless.value ? SDL_FALSE : SDL_TRUE);
 
+    // secondary window
+    SDL_SetWindowSize(draw_context_2, width, height);
+    if (previous_display >= 0)
+        SDL_SetWindowPosition(draw_context_2, SDL_WINDOWPOS_CENTERED_DISPLAY(previous_display), SDL_WINDOWPOS_CENTERED_DISPLAY(previous_display));
+    else
+        SDL_SetWindowPosition(draw_context_2, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    SDL_SetWindowDisplayMode(draw_context_2, VID_SDL2_GetDisplayMode(width, height, refreshrate, bpp));
+    SDL_SetWindowBordered(draw_context_2, vid_borderless.value ? SDL_FALSE : SDL_TRUE);
+
 	/* Make window fullscreen if needed, and show the window */
 
 	if (fullscreen) {
@@ -451,6 +492,7 @@ static qboolean VID_SetMode (int width, int height, int refreshrate, int bpp, qb
 	}
 
 	SDL_ShowWindow (draw_context);
+	SDL_ShowWindow (draw_context_2);
 
 	vid.width = VID_GetCurrentWidth();
 	vid.height = VID_GetCurrentHeight();
@@ -665,7 +707,25 @@ static void GL_InitInstance( void )
 	}
 #endif
 
-	free((void*)instance_extensions);
+    free((void*) instance_extensions);
+
+#ifdef D3D12_ENABLED
+    HRESULT hr;
+
+    hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void**) &d3d12_device);
+    if (hr != S_OK)
+        Sys_Error("Couldn't create D3D12 device");
+
+#ifdef _DEBUG
+    hr = d3d12_device->lpVtbl->QueryInterface(d3d12_device, &IID_ID3D12Debug, (void**) &d3d12_debug);
+    if (SUCCEEDED(hr))
+        d3d12_debug->lpVtbl->EnableDebugLayer(d3d12_debug);
+#endif
+
+    hr = CreateDXGIFactory(&IID_IDXGIFactory4, (void**) &dxgi_factory);
+    if (hr != S_OK)
+        Sys_Error("Couldn't create DXGI factory");
+#endif
 }
 
 /*
@@ -1624,6 +1684,41 @@ static qboolean GL_CreateSwapChain( void )
 			Sys_Error("vkCreateSemaphore failed");
 	}
 
+#ifdef D3D12_ENABLED
+    HRESULT hr;
+    D3D12_COMMAND_QUEUE_DESC d3d12_queue_desc;
+    memset(&d3d12_queue_desc, 0, sizeof(d3d12_queue_desc)); // all default to 0, no settings needed
+    hr = d3d12_device->lpVtbl->CreateCommandQueue(d3d12_device, &d3d12_queue_desc, &IID_ID3D12CommandQueue, (void**) &d3d12_queue);
+    if (hr != S_OK)
+        Sys_Error("CreateCommandQueue failed");
+
+    SDL_SysWMinfo wminfo2;
+    HWND hwnd;
+    void * secondWindow = VID_GetWindow2();
+
+    SDL_VERSION(&wminfo2.version);
+    if (!SDL_GetWindowWMInfo(draw_context_2, &wminfo2))
+        Sys_Error("Couldn't get window wm info: %s", SDL_GetError());
+
+    DXGI_SWAP_CHAIN_DESC1 dxgi_swap_chain_desc1;
+    memset(&dxgi_swap_chain_desc1, 0, sizeof(dxgi_swap_chain_desc1));
+
+    dxgi_swap_chain_desc1.Width = vid.width;
+    dxgi_swap_chain_desc1.Height = vid.height;
+    dxgi_swap_chain_desc1.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    dxgi_swap_chain_desc1.SampleDesc.Count = 1;
+    dxgi_swap_chain_desc1.SampleDesc.Quality = 0;
+    dxgi_swap_chain_desc1.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    dxgi_swap_chain_desc1.BufferCount = 2;
+    dxgi_swap_chain_desc1.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+
+    hr = dxgi_factory->lpVtbl->CreateSwapChainForHwnd(dxgi_factory, d3d12_queue, wminfo2.info.win.window, &dxgi_swap_chain_desc1, NULL, NULL, (void**) &dxgi_swap_chain);
+    //hr = dxgi_factory->lpVtbl->CreateSwapChainForComposition(dxgi_factory, d3d12_queue, &dxgi_swap_chain_desc1, NULL, (void**) &dxgi_swap_chain);
+    if (hr != S_OK)
+        Sys_Error("CreateSwapChainForHwnd failed");
+#endif
+
+
 	return true;
 }
 
@@ -2024,6 +2119,7 @@ void VID_Shutdown (void)
 	{
 		SDL_QuitSubSystem(SDL_INIT_VIDEO);
 		draw_context = NULL;
+        draw_context_2 = NULL;
 		PL_VID_Shutdown();
 	}
 }

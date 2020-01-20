@@ -25,6 +25,10 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #ifndef __GLQUAKE_H
 #define __GLQUAKE_H
 
+#ifdef D3D12_ENABLED
+#include <d3d12.h>
+#endif
+
 void GL_WaitForDeviceIdle (void);
 qboolean GL_BeginRendering (int *x, int *y, int *width, int *height);
 qboolean GL_AcquireNextSwapChainImage (void);
@@ -125,6 +129,16 @@ typedef struct
 	VkSampleCountFlagBits				sample_count;
 	qboolean							supersampling;
 	qboolean							non_solid_fill;
+
+#ifdef D3D12_ENABLED
+    ID3D12CommandQueue*                 d3d12_queue;
+    ID3D12CommandList*                  d3d12_command_list;
+    ID3D12PipelineState*                d3d12_current_pipeline;
+    DXGI_FORMAT                         dxgi_swap_chain_format;
+    DXGI_FORMAT                         dxgi_color_format;
+    DXGI_FORMAT                         dxgi_depth_format;
+    DXGI_SAMPLE_DESC                    dxgi_sample_desc;
+#endif
 
 	// Extensions
 	qboolean							dedicated_allocation;

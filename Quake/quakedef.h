@@ -48,6 +48,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #define	VKQUAKE_VER_SUFFIX		// optional version suffix like -beta1
 #endif
 
+#define D3D12_ENABLED
+
 #define	QS_STRINGIFY_(x)	#x
 #define	QS_STRINGIFY(x)	QS_STRINGIFY_(x)
 
