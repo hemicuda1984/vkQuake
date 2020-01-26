@@ -70,6 +70,14 @@ typedef struct
 	VkBuffer			buffer;
 	VkCommandBuffer		command_buffer;
 	VkFence				fence;
+#ifdef D3D12_ENABLED
+    ID3D12Resource *    d3d12_buffer;
+    ID3D12CommandAllocator * d3d12_command_allocator;
+    ID3D12GraphicsCommandList * d3d12_command_buffer;
+    ID3D12Fence*        d3d12_fence;
+    UINT64              d3d12_fence_value;
+    unsigned char *		d3d12_data;
+#endif
 	int					current_offset;
 	qboolean			submitted;
 	unsigned char *		data;
@@ -97,6 +105,10 @@ typedef struct
 	VkBuffer			buffer;
 	uint32_t			current_offset;
 	unsigned char *		data;
+#ifdef D3D12_ENABLED
+    ID3D12Resource *    d3d12_buffer;
+    unsigned char *		d3d12_data;
+#endif
 } dynbuffer_t;
 
 static uint32_t			current_dyn_vertex_buffer_size = INITIAL_DYNAMIC_VERTEX_BUFFER_SIZE_KB * 1024;
@@ -118,6 +130,10 @@ static int					num_desc_set_garbage[GARBAGE_FRAME_COUNT];
 static VkDeviceMemory *		device_memory_garbage[GARBAGE_FRAME_COUNT];
 static VkDescriptorSet *	descriptor_set_garbage[GARBAGE_FRAME_COUNT];
 static VkBuffer *			buffer_garbage[GARBAGE_FRAME_COUNT];
+
+#ifdef D3D12_ENABLED
+
+#endif
 
 void R_VulkanMemStats_f (void);
 
@@ -269,6 +285,46 @@ float GL_WaterAlphaForSurface (msurface_t *fa)
 R_CreateStagingBuffers
 ===============
 */
+
+#ifdef D3D12_ENABLED
+static void D3D12_R_CreateStagingBuffers()
+{
+    int i;
+    HRESULT err;
+
+    D3D12_RESOURCE_DESC buffer_create_info;
+    memset(&buffer_create_info, 0, sizeof(buffer_create_info));
+    buffer_create_info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_create_info.Width = (UINT64) vulkan_globals.staging_buffer_size;
+    buffer_create_info.Height = 1;
+    buffer_create_info.DepthOrArraySize = 1;
+    buffer_create_info.MipLevels = 1;
+    buffer_create_info.SampleDesc.Count = 1;
+    buffer_create_info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    D3D12_HEAP_PROPERTIES heap_properties;
+    memset(&heap_properties, 0, sizeof(heap_properties));
+    heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    for (i = 0; i < NUM_STAGING_BUFFERS; ++i)
+    {
+        staging_buffers[i].current_offset = 0;
+        staging_buffers[i].submitted = false;
+
+
+        err = vulkan_globals.d3d12_device->lpVtbl->CreateCommittedResource(vulkan_globals.d3d12_device, &heap_properties, D3D12_HEAP_FLAG_NONE, &buffer_create_info, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, &staging_buffers[i].d3d12_buffer);
+        if (FAILED(err))
+            Sys_Error("CreateCommittedResource failed");
+    }
+
+    for (i = 0; i < NUM_STAGING_BUFFERS; ++i) {
+        err = staging_buffers[i].d3d12_buffer->lpVtbl->Map(staging_buffers[i].d3d12_buffer, 0, NULL, &staging_buffers[i].d3d12_data);
+        if (FAILED(err))
+            Sys_Error("Map failed");
+    }
+}
+#endif
+
 static void R_CreateStagingBuffers()
 {
 	int i;
@@ -327,7 +383,12 @@ static void R_CreateStagingBuffers()
 
 	for (i = 0; i < NUM_STAGING_BUFFERS; ++i)
 		staging_buffers[i].data = (unsigned char *)data + (i * aligned_size);
+
+#ifdef D3D12_ENABLED
+    D3D12_R_CreateStagingBuffers();
+#endif
 }
+
 
 /*
 ===============
@@ -343,6 +404,12 @@ static void R_DestroyStagingBuffers()
 	for (i = 0; i < NUM_STAGING_BUFFERS; ++i) {
 		vkDestroyBuffer(vulkan_globals.device, staging_buffers[i].buffer, NULL);
 	}
+#ifdef D3D12_ENABLED
+    for (i = 0; i < NUM_STAGING_BUFFERS; ++i) {
+        staging_buffers[i].d3d12_buffer->lpVtbl->Unmap(staging_buffers[i].d3d12_buffer, 0, NULL);
+        staging_buffers[i].d3d12_buffer->lpVtbl->Release(staging_buffers[i].d3d12_buffer);
+    }
+#endif
 }
 
 /*
@@ -401,6 +468,26 @@ void R_InitStagingBuffers()
 		if (err != VK_SUCCESS)
 			Sys_Error("vkBeginCommandBuffer failed");
 	}
+
+#ifdef D3D12_ENABLED
+    HRESULT hr;
+
+    for (i = 0; i < NUM_STAGING_BUFFERS; ++i)
+    {
+        hr = vulkan_globals.d3d12_device->lpVtbl->CreateCommandAllocator(vulkan_globals.d3d12_device, D3D12_COMMAND_LIST_TYPE_COPY, &IID_ID3D12CommandAllocator, &staging_buffers[i].d3d12_command_allocator);
+        if (FAILED(hr))
+            Sys_Error("CreateCommandAllocator failed");
+
+        hr = vulkan_globals.d3d12_device->lpVtbl->CreateCommandList(vulkan_globals.d3d12_device, 0, D3D12_COMMAND_LIST_TYPE_COPY, staging_buffers[i].d3d12_command_allocator, NULL, &IID_ID3D12GraphicsCommandList, (void**)&staging_buffers[i].d3d12_command_buffer);
+        if (FAILED(hr))
+            Sys_Error("CreateCommandList failed");
+
+        staging_buffers[i].d3d12_fence_value = 0;
+        hr = vulkan_globals.d3d12_device->lpVtbl->CreateFence(vulkan_globals.d3d12_device, staging_buffers[i].d3d12_fence_value, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void**) &staging_buffers[i].d3d12_fence);
+        if (FAILED(hr))
+            Sys_Error("CreateFence failed");
+    }
+#endif
 }
 
 /*
@@ -436,6 +523,27 @@ static void R_SubmitStagingBuffer(int index)
 
 	staging_buffers[index].submitted = true;
 	current_staging_buffer = (current_staging_buffer + 1) % NUM_STAGING_BUFFERS;
+
+#ifdef D3D12_ENABLED
+    /*D3D12_RESOURCE_BARRIER barrier;
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = glt->d3d12_image;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+
+    d3d12_command_buffer->lpVtbl->ResourceBarrier(d3d12_command_buffer, 1, &barrier);
+    
+    MAYBE ?
+    */
+
+    staging_buffers[index].d3d12_command_buffer->lpVtbl->Close(staging_buffers[index].d3d12_command_buffer);
+
+    vulkan_globals.d3d12_queue->lpVtbl->ExecuteCommandLists(vulkan_globals.d3d12_copy_queue, 1, (ID3D12CommandList**) &staging_buffers[index].d3d12_command_buffer);
+    staging_buffers[index].d3d12_fence_value++;
+    vulkan_globals.d3d12_queue->lpVtbl->Signal(vulkan_globals.d3d12_queue, staging_buffers[index].d3d12_fence, staging_buffers[index].d3d12_fence_value);
+#endif
 }
 
 /*
@@ -484,6 +592,15 @@ static void R_FlushStagingBuffer(stagingbuffer_t * staging_buffer)
 	err = vkBeginCommandBuffer(staging_buffer->command_buffer, &command_buffer_begin_info);
 	if (err != VK_SUCCESS)
 		Sys_Error("vkBeginCommandBuffer failed");
+
+#ifdef D3D12_ENABLED
+    while (staging_buffer->d3d12_fence->lpVtbl->GetCompletedValue(staging_buffer->d3d12_fence) < staging_buffer->d3d12_fence_value) {
+        // TODO: replace with WaitForSingleObject
+    }
+
+    if (FAILED(staging_buffer->d3d12_command_buffer->lpVtbl->Reset(staging_buffer->d3d12_command_buffer, staging_buffer->d3d12_command_allocator, NULL)))
+        Sys_Error("Reset failed");
+#endif
 }
 
 /*
@@ -531,6 +648,25 @@ byte * R_StagingAllocate(int size, int alignment, VkCommandBuffer * command_buff
 	staging_buffer->current_offset += size;
 
 	return data;
+}
+
+byte * R_StagingAllocate_D3D12(int size, int alignment, ID3D12GraphicsCommandList ** command_buffer, ID3D12Resource** buffer, int * buffer_offset)
+{
+    stagingbuffer_t * staging_buffer = &staging_buffers[current_staging_buffer];
+
+    // Assumes this is called immediatelly after R_StagingAllocate
+    // so ...
+    int real_current_offset = staging_buffer->current_offset - size;
+
+    if (command_buffer)
+        *command_buffer = staging_buffer->d3d12_command_buffer;
+    if (buffer)
+        *buffer = staging_buffer->d3d12_buffer;
+    if (buffer_offset)
+        *buffer_offset = real_current_offset;
+
+    unsigned char *data = staging_buffer->d3d12_data + real_current_offset;
+    return data;
 }
 
 /*
@@ -598,6 +734,34 @@ static void R_InitDynamicVertexBuffers()
 
 	for (i = 0; i < NUM_DYNAMIC_BUFFERS; ++i)
 		dyn_vertex_buffers[i].data = (unsigned char *)data + (i * aligned_size);
+
+#ifdef D3D12_ENABLED
+
+    D3D12_RESOURCE_DESC d3d12_buffer_create_info;
+    memset(&d3d12_buffer_create_info, 0, sizeof(d3d12_buffer_create_info));
+    d3d12_buffer_create_info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d3d12_buffer_create_info.Width = (UINT64) current_dyn_vertex_buffer_size;
+    d3d12_buffer_create_info.Height = 1;
+    d3d12_buffer_create_info.DepthOrArraySize = 1;
+    d3d12_buffer_create_info.MipLevels = 1;
+    d3d12_buffer_create_info.SampleDesc.Count = 1;
+    d3d12_buffer_create_info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    D3D12_HEAP_PROPERTIES heap_properties;
+    memset(&heap_properties, 0, sizeof(heap_properties));
+    heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    for (i = 0; i < NUM_DYNAMIC_BUFFERS; ++i)
+    {
+        if (FAILED(vulkan_globals.d3d12_device->lpVtbl->CreateCommittedResource(vulkan_globals.d3d12_device, &heap_properties, D3D12_HEAP_FLAG_NONE, &d3d12_buffer_create_info, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, &dyn_vertex_buffers[i].d3d12_buffer)))
+            Sys_Error("CreateCommittedResource failed");
+    }
+
+    for (i = 0; i < NUM_DYNAMIC_BUFFERS; ++i) {
+        if (FAILED(dyn_vertex_buffers[i].d3d12_buffer->lpVtbl->Map(dyn_vertex_buffers[i].d3d12_buffer, 0, NULL, &dyn_vertex_buffers[i].d3d12_data)))
+            Sys_Error("Map failed");
+    }
+#endif
 }
 
 /*
@@ -665,6 +829,34 @@ static void R_InitDynamicIndexBuffers()
 
 	for (i = 0; i < NUM_DYNAMIC_BUFFERS; ++i)
 		dyn_index_buffers[i].data = (unsigned char *)data + (i * aligned_size);
+
+#ifdef D3D12_ENABLED
+
+    D3D12_RESOURCE_DESC d3d12_buffer_create_info;
+    memset(&d3d12_buffer_create_info, 0, sizeof(d3d12_buffer_create_info));
+    d3d12_buffer_create_info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d3d12_buffer_create_info.Width = (UINT64) current_dyn_vertex_buffer_size;
+    d3d12_buffer_create_info.Height = 1;
+    d3d12_buffer_create_info.DepthOrArraySize = 1;
+    d3d12_buffer_create_info.MipLevels = 1;
+    d3d12_buffer_create_info.SampleDesc.Count = 1;
+    d3d12_buffer_create_info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    D3D12_HEAP_PROPERTIES heap_properties;
+    memset(&heap_properties, 0, sizeof(heap_properties));
+    heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    for (i = 0; i < NUM_DYNAMIC_BUFFERS; ++i)
+    {
+        if (FAILED(vulkan_globals.d3d12_device->lpVtbl->CreateCommittedResource(vulkan_globals.d3d12_device, &heap_properties, D3D12_HEAP_FLAG_NONE, &d3d12_buffer_create_info, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, &dyn_index_buffers[i].d3d12_buffer)))
+            Sys_Error("CreateCommittedResource failed");
+    }
+
+    for (i = 0; i < NUM_DYNAMIC_BUFFERS; ++i) {
+        if (FAILED(dyn_index_buffers[i].d3d12_buffer->lpVtbl->Map(dyn_index_buffers[i].d3d12_buffer, 0, NULL, &dyn_index_buffers[i].d3d12_data)))
+            Sys_Error("Map failed");
+    }
+#endif
 }
 
 /*
@@ -1035,6 +1227,83 @@ byte * R_UniformAllocate(int size, VkBuffer * buffer, uint32_t * buffer_offset, 
 	return data;
 }
 
+#ifdef D3D12_ENABLED
+byte * R_VertexAllocate_D3D12(int size, ID3D12Resource ** buffer, uint32_t * buffer_offset)
+{
+    dynbuffer_t *dyn_vb = &dyn_vertex_buffers[current_dyn_buffer_index];
+
+    if ((dyn_vb->current_offset + size) > current_dyn_vertex_buffer_size)
+    {
+        R_AddDynamicBufferGarbage(dyn_vertex_buffer_memory, dyn_vertex_buffers, NULL);
+        current_dyn_vertex_buffer_size = q_max(current_dyn_vertex_buffer_size * 2, (uint32_t) Q_nextPow2(size));
+        vkUnmapMemory(vulkan_globals.device, dyn_vertex_buffer_memory);
+        R_InitDynamicVertexBuffers();
+    }
+
+    *buffer = dyn_vb->d3d12_buffer;
+    *buffer_offset = dyn_vb->current_offset;
+
+    unsigned char *data = dyn_vb->data + dyn_vb->current_offset;
+    dyn_vb->current_offset += size;
+
+    return data;
+}
+
+byte * R_IndexAllocate_D3D12(int size, ID3D12Resource ** buffer, uint32_t * buffer_offset)
+{
+    // Align to 4 bytes because we allocate both uint16 and uint32
+    // index buffers and alignment must match index size
+    const int align_mod = size % 4;
+    const int aligned_size = ((size % 4) == 0) ? size : (size + 4 - align_mod);
+
+    dynbuffer_t *dyn_ib = &dyn_index_buffers[current_dyn_buffer_index];
+
+    if ((dyn_ib->current_offset + aligned_size) > current_dyn_index_buffer_size)
+    {
+        R_AddDynamicBufferGarbage(dyn_index_buffer_memory, dyn_index_buffers, NULL);
+        current_dyn_index_buffer_size = q_max(current_dyn_index_buffer_size * 2, (uint32_t) Q_nextPow2(size));
+        vkUnmapMemory(vulkan_globals.device, dyn_index_buffer_memory);
+        R_InitDynamicIndexBuffers();
+    }
+
+    *buffer = dyn_ib->d3d12_buffer;
+    *buffer_offset = dyn_ib->current_offset;
+
+    unsigned char *data = dyn_ib->data + dyn_ib->current_offset;
+    dyn_ib->current_offset += aligned_size;
+
+    return data;
+}
+
+byte * R_UniformAllocate_D3D12(int size, ID3D12Resource ** buffer, uint32_t * buffer_offset, VkDescriptorSet * descriptor_set)
+{
+    if (size > MAX_UNIFORM_ALLOC)
+        Sys_Error("Increase MAX_UNIFORM_ALLOC");
+
+    const int align_mod = size % 256;
+    const int aligned_size = ((size % 256) == 0) ? size : (size + 256 - align_mod);
+
+    dynbuffer_t *dyn_ub = &dyn_uniform_buffers[current_dyn_buffer_index];
+
+    if ((dyn_ub->current_offset + MAX_UNIFORM_ALLOC) > current_dyn_uniform_buffer_size)
+    {
+        R_AddDynamicBufferGarbage(dyn_uniform_buffer_memory, dyn_uniform_buffers, ubo_descriptor_sets);
+        current_dyn_uniform_buffer_size = q_max(current_dyn_uniform_buffer_size * 2, (uint32_t) Q_nextPow2(size));
+        vkUnmapMemory(vulkan_globals.device, dyn_uniform_buffer_memory);
+        R_InitDynamicUniformBuffers();
+    }
+
+    *buffer = dyn_ub->d3d12_buffer;
+    *buffer_offset = dyn_ub->current_offset;
+
+    unsigned char *data = dyn_ub->data + dyn_ub->current_offset;
+    dyn_ub->current_offset += aligned_size;
+
+    *descriptor_set = ubo_descriptor_sets[current_dyn_buffer_index];
+
+    return data;
+}
+#endif
 /*
 ===============
 R_InitGPUBuffers

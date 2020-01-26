@@ -111,6 +111,14 @@ typedef struct particle_s
 
 #define WORLD_PIPELINE_COUNT 8
 
+#ifdef D3D12_ENABLED
+typedef struct {
+    ID3D12DescriptorHeap * descriptor_heap;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle;
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle;
+} descriptor_heap_data;
+#endif
+
 typedef struct
 {
 	VkDevice							device;
@@ -131,6 +139,8 @@ typedef struct
 	qboolean							non_solid_fill;
 
 #ifdef D3D12_ENABLED
+    ID3D12Device*                       d3d12_device;
+    ID3D12CommandQueue*                 d3d12_copy_queue;
     ID3D12CommandQueue*                 d3d12_queue;
     ID3D12GraphicsCommandList*          d3d12_command_list;
     ID3D12PipelineState*                d3d12_current_pipeline;
@@ -171,6 +181,11 @@ typedef struct
     ID3D12PipelineState*                d3d12_showtris_pipeline;
     ID3D12PipelineState*                d3d12_showtris_depth_test_pipeline;
     ID3D12RootSignature*                d3d12_showtris_pipeline_layout;
+
+    descriptor_heap_data                d3d12_dheap_global;
+    uint32_t                            d3d12_dheap_global_next_free_index;
+
+    uint32_t                            d3d12_dheap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES];
 #endif
 
 	// Extensions
@@ -486,6 +501,14 @@ void R_CollectDynamicBufferGarbage();
 byte * R_VertexAllocate(int size, VkBuffer * buffer, VkDeviceSize * buffer_offset);
 byte * R_IndexAllocate(int size, VkBuffer * buffer, VkDeviceSize * buffer_offset);
 byte * R_UniformAllocate(int size, VkBuffer * buffer, uint32_t * buffer_offset, VkDescriptorSet * descriptor_set);
+
+#ifdef D3D12_ENABLED
+byte * R_VertexAllocate_D3D12(int size, ID3D12Resource ** buffer, uint32_t * buffer_offset);
+byte * R_IndexAllocate_D3D12(int size, ID3D12Resource ** buffer, uint32_t * buffer_offset);
+byte * R_UniformAllocate_D3D12(int size, ID3D12Resource ** buffer, uint32_t * buffer_offset, VkDescriptorSet * descriptor_set);
+
+byte * R_StagingAllocate_D3D12(int size, int alignment, ID3D12GraphicsCommandList ** command_buffer, ID3D12Resource** buffer, int * buffer_offset);
+#endif
 
 void GL_SetObjectName(uint64_t object, VkDebugReportObjectTypeEXT objectType, const char * name);
 

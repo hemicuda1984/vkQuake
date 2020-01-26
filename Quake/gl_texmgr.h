@@ -23,6 +23,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #ifndef _GL_TEXMAN_H
 #define _GL_TEXMAN_H
 
+#include <d3d12.h>
+
 //gl_texmgr.h -- fitzquake's texture manager. manages opengl texture images
 
 #define TEXPREF_NONE			0x0000
@@ -72,6 +74,12 @@ typedef struct gltexture_s {
 	VkDescriptorSet		descriptor_set;
 	VkFramebuffer		frame_buffer;
 	VkDescriptorSet		warp_write_descriptor_set;
+#ifdef D3D12_ENABLED
+    ID3D12Resource*     d3d12_image;
+    D3D12_CPU_DESCRIPTOR_HANDLE d3d12_image_view_cpu;
+    D3D12_GPU_DESCRIPTOR_HANDLE d3d12_image_view_gpu;
+
+#endif
 	int			visframe; //matches r_framecount if texture was bound this frame
 } gltexture_t;
 

@@ -25,6 +25,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "gl_heap.h"
+#include <d3d12.h>
 
 static cvar_t	gl_max_size = {"gl_max_size", "0", CVAR_NONE};
 static cvar_t	gl_picmip = {"gl_picmip", "0", CVAR_NONE};
@@ -97,6 +98,10 @@ static void TexMgr_SetFilterModes (gltexture_t *glt)
 	texture_write.pImageInfo = &image_info;
 
 	vkUpdateDescriptorSets(vulkan_globals.device, 1, &texture_write, 0, NULL);
+
+#ifdef D3D12_ENABLED
+    // TODO
+#endif
 }
 
 /*
@@ -942,6 +947,42 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 
 	TexMgr_SetFilterModes (glt);
 
+#ifdef D3D12_ENABLED
+
+
+    GL_SetObjectName((uint64_t) glt->image, VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT, glt->name);
+
+    D3D12_HEAP_PROPERTIES heap_properties;
+    memset(&heap_properties, 0, sizeof(heap_properties));
+    heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC resource_desc;
+    memset(&resource_desc, 0, sizeof(resource_desc));
+    resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    resource_desc.Width = glt->width;
+    resource_desc.Height = glt->height;
+    resource_desc.DepthOrArraySize = 1;
+    resource_desc.MipLevels = num_mips;
+    resource_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    resource_desc.SampleDesc.Count = 1;
+    resource_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    resource_desc.Flags = warp_image ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET : D3D12_RESOURCE_FLAG_NONE;
+
+    if (FAILED(vulkan_globals.d3d12_device->lpVtbl->CreateCommittedResource(vulkan_globals.d3d12_device, &heap_properties, D3D12_HEAP_FLAG_NONE, &resource_desc, D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, &glt->d3d12_image)))
+        Sys_Error("CreateCommittedResource failed");
+
+    glt->d3d12_image_view_cpu = vulkan_globals.d3d12_dheap_global.cpu_handle;
+    glt->d3d12_image_view_cpu.ptr += vulkan_globals.d3d12_dheap_global_next_free_index * vulkan_globals.d3d12_dheap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV];
+    
+    glt->d3d12_image_view_gpu = vulkan_globals.d3d12_dheap_global.gpu_handle;
+    glt->d3d12_image_view_gpu.ptr += vulkan_globals.d3d12_dheap_global_next_free_index * vulkan_globals.d3d12_dheap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV];
+    
+    ++vulkan_globals.d3d12_dheap_global_next_free_index;
+
+    vulkan_globals.d3d12_device->lpVtbl->CreateShaderResourceView(vulkan_globals.d3d12_device, glt->d3d12_image, NULL, glt->d3d12_image_view_cpu);
+
+#endif
+
 	// Don't upload data for warp image, will be updated by rendering
 	if (warp_image)
 	{
@@ -1013,7 +1054,16 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 	VkCommandBuffer command_buffer;
 	int staging_offset;
 	unsigned char * staging_memory = R_StagingAllocate(staging_size, 4, &command_buffer, &staging_buffer, &staging_offset);
+#ifdef D3D12_ENABLED
 
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT d3d12_regions[MAX_MIPS];
+    memset(&d3d12_regions, 0, sizeof(d3d12_regions));
+
+    ID3D12Resource* d3d12_staging_buffer;
+    ID3D12GraphicsCommandList* d3d12_command_buffer;
+    int d3d12_staging_offset;
+	unsigned char * d3d12_staging_memory = R_StagingAllocate_D3D12(staging_size, 4, &d3d12_command_buffer, &d3d12_staging_buffer, &d3d12_staging_offset);
+#endif
 	int num_regions = 0;
 	int mip_offset = 0;
 
@@ -1025,6 +1075,7 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 		while (mipwidth >= 1 && mipheight >= 1)
 		{
 			memcpy(staging_memory + mip_offset, data, mipwidth * mipheight * 4);
+			memcpy(d3d12_staging_memory + mip_offset, data, mipwidth * mipheight * 4);
 			regions[num_regions].bufferOffset = staging_offset + mip_offset;
 			regions[num_regions].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 			regions[num_regions].imageSubresource.layerCount = 1;
@@ -1032,6 +1083,13 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 			regions[num_regions].imageExtent.width = mipwidth;
 			regions[num_regions].imageExtent.height = mipheight;
 			regions[num_regions].imageExtent.depth = 1;
+
+            d3d12_regions[num_regions].Offset = staging_offset + mip_offset;
+            d3d12_regions[num_regions].Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            d3d12_regions[num_regions].Footprint.Width = mipwidth;
+            d3d12_regions[num_regions].Footprint.Height = mipheight;
+            d3d12_regions[num_regions].Footprint.Depth = 1;
+            d3d12_regions[num_regions].Footprint.RowPitch = mipwidth * 4;
 
 			mip_offset += mipwidth * mipheight * 4;
 			num_regions += 1;
@@ -1046,6 +1104,7 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 	else
 	{
 		memcpy(staging_memory + mip_offset, data, mipwidth * mipheight * 4);
+		memcpy(d3d12_staging_memory + mip_offset, data, mipwidth * mipheight * 4);
 		regions[0].bufferOffset = staging_offset + mip_offset;
 		regions[0].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		regions[0].imageSubresource.layerCount = 1;
@@ -1053,6 +1112,15 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 		regions[0].imageExtent.width = mipwidth;
 		regions[0].imageExtent.height = mipheight;
 		regions[0].imageExtent.depth = 1;
+
+        d3d12_regions[0].Offset = staging_offset + mip_offset;
+        d3d12_regions[0].Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        d3d12_regions[0].Footprint.Width = mipwidth;
+        d3d12_regions[0].Footprint.Height = mipheight;
+        d3d12_regions[0].Footprint.Depth = 1;
+        d3d12_regions[0].Footprint.RowPitch = mipwidth * 4;
+
+        num_regions = 1;
 	}
 
 	VkImageMemoryBarrier image_memory_barrier;
@@ -1080,6 +1148,36 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
 	image_memory_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 	image_memory_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &image_memory_barrier);
+
+#ifdef D3D12_ENABLED
+    // No need for barrier before copy. Resource was created with D3D12_RESOURCE_STATE_COPY_DEST
+
+    D3D12_TEXTURE_COPY_LOCATION src;
+    memset(&src, 0, sizeof(src));
+    src.pResource = d3d12_staging_buffer;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+
+    D3D12_TEXTURE_COPY_LOCATION dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.pResource = glt->d3d12_image;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+
+    for (UINT ii = 0; ii < num_regions; ++ii) {
+        src.PlacedFootprint = d3d12_regions[ii];
+        dst.SubresourceIndex = ii;
+        d3d12_command_buffer->lpVtbl->CopyTextureRegion(d3d12_command_buffer, &dst, 0, 0, 0, &src, NULL);
+    }
+
+    D3D12_RESOURCE_BARRIER barrier;
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = glt->d3d12_image;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    d3d12_command_buffer->lpVtbl->ResourceBarrier(d3d12_command_buffer, 1, &barrier);
+#endif
 }
 
 /*
@@ -1438,6 +1536,10 @@ static void GL_DeleteTexture (gltexture_t *texture)
 		vkFreeDescriptorSets(vulkan_globals.device, vulkan_globals.descriptor_pool, 1, &texture->warp_write_descriptor_set);
 
 	GL_FreeFromHeaps(TEXTURE_MAX_HEAPS, texmgr_heaps, texture->heap, texture->heap_node, &num_vulkan_tex_allocations);
+
+#ifdef D3D12_ENABLED
+    texture->d3d12_image->lpVtbl->Release(texture->d3d12_image);
+#endif
 
 	texture->frame_buffer = VK_NULL_HANDLE;
 	texture->target_image_view = VK_NULL_HANDLE;

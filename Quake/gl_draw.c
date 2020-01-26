@@ -499,6 +499,22 @@ void Draw_Character (int x, int y, int num)
 	R_BindPipeline(vulkan_globals.basic_alphatest_pipeline[render_pass_index]);
 	vulkan_globals.vk_cmd_bind_descriptor_sets(vulkan_globals.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout, 0, 1, &char_texture->descriptor_set, 0, NULL);
 	vulkan_globals.vk_cmd_draw(vulkan_globals.command_buffer, 6, 1, 0, 0);
+
+#ifdef D3D12_ENABLED
+    ID3D12Resource* d3d12_buffer;
+    uint32_t d3d12_buffer_offset;
+    basicvertex_t * d3d12_vertices = (basicvertex_t*) R_VertexAllocate_D3D12(6 * sizeof(basicvertex_t), &d3d12_buffer, &d3d12_buffer_offset);
+
+    Draw_FillCharacterQuad(x, y, (char) num, d3d12_vertices);
+
+    D3D12_VERTEX_BUFFER_VIEW d3d12_vb_view;
+    d3d12_vb_view.BufferLocation = d3d12_buffer->lpVtbl->GetGPUVirtualAddress(d3d12_buffer) + d3d12_buffer_offset;
+    d3d12_vb_view.StrideInBytes = sizeof(basicvertex_t);
+    d3d12_vb_view.SizeInBytes = 6 * d3d12_vb_view.StrideInBytes;
+    vulkan_globals.d3d12_command_list->lpVtbl->IASetVertexBuffers(vulkan_globals.d3d12_command_list, 0, 1, &d3d12_vb_view);
+
+    vulkan_globals.d3d12_command_list->lpVtbl->DrawInstanced(vulkan_globals.d3d12_command_list, 6, 1, 0, 0);
+#endif
 }
 
 /*
@@ -537,6 +553,30 @@ void Draw_String (int x, int y, const char *str)
 	R_BindPipeline(vulkan_globals.basic_alphatest_pipeline[render_pass_index]);
 	vulkan_globals.vk_cmd_bind_descriptor_sets(vulkan_globals.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout, 0, 1, &char_texture->descriptor_set, 0, NULL);
 	vulkan_globals.vk_cmd_draw(vulkan_globals.command_buffer, num_verts, 1, 0, 0);
+
+#ifdef D3D12_ENABLED
+    ID3D12Resource * d3d12_buffer;
+    uint32_t d3d12_buffer_offset;
+    basicvertex_t * d3d12_vertices = (basicvertex_t*) R_VertexAllocate_D3D12(num_verts * sizeof(basicvertex_t), &d3d12_buffer, &d3d12_buffer_offset);
+
+    for (i = 0; *str != 0; ++str)
+    {
+        if (*str != 32)
+        {
+            Draw_FillCharacterQuad(x, y, *str, d3d12_vertices + i * 6);
+            i++;
+        }
+        x += 8;
+    }
+
+    D3D12_VERTEX_BUFFER_VIEW d3d12_vb_view;
+    d3d12_vb_view.BufferLocation = d3d12_buffer->lpVtbl->GetGPUVirtualAddress(d3d12_buffer) + buffer_offset;
+    d3d12_vb_view.StrideInBytes = sizeof(basicvertex_t);
+    d3d12_vb_view.SizeInBytes = num_verts * d3d12_vb_view.StrideInBytes;
+    vulkan_globals.d3d12_command_list->lpVtbl->IASetVertexBuffers(vulkan_globals.d3d12_command_list, 0, 1, &d3d12_vb_view);
+    vulkan_globals.d3d12_command_list->lpVtbl->SetPipelineState(vulkan_globals.d3d12_command_list, vulkan_globals.d3d12_basic_alphatest_pipeline[render_pass_index]);
+    //vulkan_globals.d3d12_command_list->lpVtbl->SetGraphicsRootConstantBufferView(vulkan_globals.d3d12_command_list, 
+#endif
 }
 
 /*

@@ -36,6 +36,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #define COBJMACROS 1
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#include "glquake.h"
 #endif
 
 #include <assert.h>
@@ -179,15 +180,15 @@ VkBool32 debug_message_callback(VkDebugReportFlagsEXT flags, VkDebugReportObject
 #endif
 
 #ifdef D3D12_ENABLED
-typedef struct {
+/*typedef struct {
     ID3D12DescriptorHeap * descriptor_heap;
     D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle;
     D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle;
-} descriptor_heap_data;
+} descriptor_heap_data;*/
 
 ID3D12Device *                      d3d12_device = NULL;
 ID3D12Debug *                       d3d12_debug = NULL;
-ID3D12CommandQueue *                d3d12_queue = NULL;
+//ID3D12CommandQueue *                d3d12_queue = NULL;
 IDXGIFactory4 *                     dxgi_factory = NULL;
 IDXGISwapChain3 *                   dxgi_swap_chain = NULL;
 static uint32_t                     dxgi_num_swap_chain_images = 2;
@@ -772,6 +773,19 @@ static void GL_InitInstance( void )
     hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void**) &d3d12_device);
     if (hr != S_OK)
         Sys_Error("Couldn't create D3D12 device");
+
+    vulkan_globals.d3d12_device = d3d12_device;
+
+    D3D12_COMMAND_QUEUE_DESC d3d12_queue_desc;
+    memset(&d3d12_queue_desc, 0, sizeof(d3d12_queue_desc)); // all default to 0, no settings needed
+    hr = d3d12_device->lpVtbl->CreateCommandQueue(d3d12_device, &d3d12_queue_desc, &IID_ID3D12CommandQueue, (void**) &vulkan_globals.d3d12_queue);
+    if (hr != S_OK)
+        Sys_Error("CreateCommandQueue failed");
+
+    d3d12_queue_desc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+    hr = d3d12_device->lpVtbl->CreateCommandQueue(d3d12_device, &d3d12_queue_desc, &IID_ID3D12CommandQueue, (void**) &vulkan_globals.d3d12_copy_queue);
+    if (hr != S_OK)
+        Sys_Error("CreateCommandQueue failed");
 
     hr = CreateDXGIFactory(&IID_IDXGIFactory4, (void**) &dxgi_factory);
     if (hr != S_OK)
@@ -1814,13 +1828,13 @@ static qboolean GL_CreateSwapChain( void )
 
 #ifdef D3D12_ENABLED
     HRESULT hr;
-    D3D12_COMMAND_QUEUE_DESC d3d12_queue_desc;
-    memset(&d3d12_queue_desc, 0, sizeof(d3d12_queue_desc)); // all default to 0, no settings needed
-    hr = d3d12_device->lpVtbl->CreateCommandQueue(d3d12_device, &d3d12_queue_desc, &IID_ID3D12CommandQueue, (void**) &d3d12_queue);
-    if (hr != S_OK)
-        Sys_Error("CreateCommandQueue failed");
+    //D3D12_COMMAND_QUEUE_DESC d3d12_queue_desc;
+    //memset(&d3d12_queue_desc, 0, sizeof(d3d12_queue_desc)); // all default to 0, no settings needed
+    //hr = d3d12_device->lpVtbl->CreateCommandQueue(d3d12_device, &d3d12_queue_desc, &IID_ID3D12CommandQueue, (void**) &d3d12_queue);
+    //if (hr != S_OK)
+    //    Sys_Error("CreateCommandQueue failed");
 
-    vulkan_globals.d3d12_queue = d3d12_queue;
+    //vulkan_globals.d3d12_queue = d3d12_queue;
 
     SDL_SysWMinfo wminfo2;
     SDL_VERSION(&wminfo2.version);
@@ -1839,7 +1853,7 @@ static qboolean GL_CreateSwapChain( void )
     dxgi_swap_chain_desc1.BufferCount = dxgi_num_swap_chain_images;
     dxgi_swap_chain_desc1.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
 
-    hr = dxgi_factory->lpVtbl->CreateSwapChainForHwnd(dxgi_factory, d3d12_queue, wminfo2.info.win.window, &dxgi_swap_chain_desc1, NULL, NULL, (void**) &dxgi_swap_chain);
+    hr = dxgi_factory->lpVtbl->CreateSwapChainForHwnd(dxgi_factory, vulkan_globals.d3d12_queue, wminfo2.info.win.window, &dxgi_swap_chain_desc1, NULL, NULL, (IDXGISwapChain1**) &dxgi_swap_chain);
     if (hr != S_OK)
         Sys_Error("CreateSwapChainForHwnd failed");
 #endif
@@ -1908,7 +1922,7 @@ static void GL_CreateFrameBuffers( void )
 	}
 
 #ifdef D3D12_ENABLED
-    HRESULT hr;
+
     D3D12_DESCRIPTOR_HEAP_DESC descriptor_heap_desc;
     memset(&descriptor_heap_desc, 0, sizeof(descriptor_heap_desc));
     descriptor_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -1919,6 +1933,7 @@ static void GL_CreateFrameBuffers( void )
 
     for (i = 0; i < D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES; ++i) {
         d3d12_dheap_increment_size[i] = d3d12_device->lpVtbl->GetDescriptorHandleIncrementSize(d3d12_device, i);
+        vulkan_globals.d3d12_dheap_increment_size[i] = d3d12_dheap_increment_size[i];
     }
 
     for (i = 0; i < dxgi_num_swap_chain_images; ++i) {
@@ -1927,12 +1942,15 @@ static void GL_CreateFrameBuffers( void )
 
         d3d12_swapchain_images[i] = back_buffer;
 
-        D3D12_CPU_DESCRIPTOR_HANDLE target;
-
         d3d12_swapchain_images_views[i] = d3d12_dheap_swapchain_image_views.cpu_handle;
         d3d12_swapchain_images_views[i].ptr += i * d3d12_dheap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_RTV];
         d3d12_device->lpVtbl->CreateRenderTargetView(d3d12_device, back_buffer, NULL, d3d12_swapchain_images_views[i]);
     }
+
+    // TODO: move somewhere else
+    // TODO: manage space
+    CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1024, &vulkan_globals.d3d12_dheap_global);
+    vulkan_globals.d3d12_dheap_global_next_free_index = 0;
 #endif
 }
 
@@ -2153,6 +2171,13 @@ qboolean GL_BeginRendering (int *x, int *y, int *width, int *height)
     d3d12_viewport.MinDepth = 0.0f;
     d3d12_viewport.MaxDepth = 1.0f;
     vulkan_globals.d3d12_command_list->lpVtbl->RSSetViewports(vulkan_globals.d3d12_command_list, 1, &d3d12_viewport);
+
+    D3D12_RECT scissor_rect;
+    scissor_rect.top = 0;
+    scissor_rect.left = 0;
+    scissor_rect.right = vid.width;
+    scissor_rect.bottom = vid.height;
+    vulkan_globals.d3d12_command_list->lpVtbl->RSSetScissorRects(vulkan_globals.d3d12_command_list, 1, &scissor_rect);
 #endif
 
 	return true;
@@ -2267,9 +2292,18 @@ void GL_EndRendering (qboolean swapchain_acquired)
 
 #ifdef D3D12_ENABLED
     // TODO: post process pass
+    if (swapchain_acquired == true) {
+        // Render post process
+        /*float postprocess_values[2] = { vid_gamma.value, q_min(2.0f, q_max(1.0f, vid_contrast.value)) };
+        vulkan_globals.d3d12_command_list->lpVtbl->SetGraphicsRootSignature(vulkan_globals.d3d12_command_list, vulkan_globals.d3d12_postprocess_pipeline_layout);
+        vulkan_globals.d3d12_command_list->lpVtbl->SetDescriptorHeaps(vulkan_globals.d3d12_command_list, 1, vulkan_globals.d3d12_dheap_postprocess);
+        vulkan_globals.d3d12_command_list->lpVtbl->SetPipelineState(vulkan_globals.d3d12_command_list, vulkan_globals.d3d12_postprocess_pipeline);
+        vulkan_globals.d3d12_command_list->lpVtbl->SetGraphicsRoot32BitConstants(vulkan_globals.d3d12_command_list, 0, 2, postprocess_values, 0);
+        vulkan_globals.d3d12_command_list->lpVtbl->DrawInstanced(vulkan_globals.d3d12_command_list, 3, 1, 0, 0);*/
+    }
 
     vulkan_globals.d3d12_command_list->lpVtbl->Close(vulkan_globals.d3d12_command_list);
-    vulkan_globals.d3d12_queue->lpVtbl->ExecuteCommandLists(vulkan_globals.d3d12_queue, 1, &vulkan_globals.d3d12_command_list);
+    vulkan_globals.d3d12_queue->lpVtbl->ExecuteCommandLists(vulkan_globals.d3d12_copy_queue, 1, &vulkan_globals.d3d12_command_list);
     d3d12_fences_last_value[current_command_buffer]++;
     vulkan_globals.d3d12_queue->lpVtbl->Signal(vulkan_globals.d3d12_queue, d3d12_fences[current_command_buffer], d3d12_fences_last_value[current_command_buffer]);
 
