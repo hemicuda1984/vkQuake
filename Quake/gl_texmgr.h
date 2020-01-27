@@ -78,6 +78,7 @@ typedef struct gltexture_s {
     ID3D12Resource*     d3d12_image;
     D3D12_CPU_DESCRIPTOR_HANDLE d3d12_image_view_cpu;
     D3D12_GPU_DESCRIPTOR_HANDLE d3d12_image_view_gpu;
+    D3D12_RESOURCE_STATES d3d12_image_state;
 
 #endif
 	int			visframe; //matches r_framecount if texture was bound this frame

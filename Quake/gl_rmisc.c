@@ -74,8 +74,8 @@ typedef struct
     ID3D12Resource *    d3d12_buffer;
     ID3D12CommandAllocator * d3d12_command_allocator;
     ID3D12GraphicsCommandList * d3d12_command_buffer;
-    ID3D12Fence*        d3d12_fence;
-    UINT64              d3d12_fence_value;
+
+    d3d12_fence_data    d3d12_fence;
     unsigned char *		d3d12_data;
 #endif
 	int					current_offset;
@@ -108,6 +108,8 @@ typedef struct
 #ifdef D3D12_ENABLED
     ID3D12Resource *    d3d12_buffer;
     unsigned char *		d3d12_data;
+    D3D12_CPU_DESCRIPTOR_HANDLE d3d12_cbv_cpu;
+    D3D12_GPU_DESCRIPTOR_HANDLE d3d12_cbv_gpu;
 #endif
 } dynbuffer_t;
 
@@ -482,8 +484,8 @@ void R_InitStagingBuffers()
         if (FAILED(hr))
             Sys_Error("CreateCommandList failed");
 
-        staging_buffers[i].d3d12_fence_value = 0;
-        hr = vulkan_globals.d3d12_device->lpVtbl->CreateFence(vulkan_globals.d3d12_device, staging_buffers[i].d3d12_fence_value, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void**) &staging_buffers[i].d3d12_fence);
+        staging_buffers[i].d3d12_fence.fence_value = 0;
+        hr = vulkan_globals.d3d12_device->lpVtbl->CreateFence(vulkan_globals.d3d12_device, staging_buffers[i].d3d12_fence.fence_value, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void**) &staging_buffers[i].d3d12_fence.fence);
         if (FAILED(hr))
             Sys_Error("CreateFence failed");
     }
@@ -538,11 +540,12 @@ static void R_SubmitStagingBuffer(int index)
     MAYBE ?
     */
 
-    staging_buffers[index].d3d12_command_buffer->lpVtbl->Close(staging_buffers[index].d3d12_command_buffer);
+    if (FAILED(staging_buffers[index].d3d12_command_buffer->lpVtbl->Close(staging_buffers[index].d3d12_command_buffer)))
+        Sys_Error("Close failed");
 
     vulkan_globals.d3d12_queue->lpVtbl->ExecuteCommandLists(vulkan_globals.d3d12_copy_queue, 1, (ID3D12CommandList**) &staging_buffers[index].d3d12_command_buffer);
-    staging_buffers[index].d3d12_fence_value++;
-    vulkan_globals.d3d12_queue->lpVtbl->Signal(vulkan_globals.d3d12_queue, staging_buffers[index].d3d12_fence, staging_buffers[index].d3d12_fence_value);
+    staging_buffers[index].d3d12_fence.fence_value++;
+    vulkan_globals.d3d12_queue->lpVtbl->Signal(vulkan_globals.d3d12_queue, staging_buffers[index].d3d12_fence.fence, staging_buffers[index].d3d12_fence.fence_value);
 #endif
 }
 
@@ -594,7 +597,7 @@ static void R_FlushStagingBuffer(stagingbuffer_t * staging_buffer)
 		Sys_Error("vkBeginCommandBuffer failed");
 
 #ifdef D3D12_ENABLED
-    while (staging_buffer->d3d12_fence->lpVtbl->GetCompletedValue(staging_buffer->d3d12_fence) < staging_buffer->d3d12_fence_value) {
+    while (staging_buffer->d3d12_fence.fence->lpVtbl->GetCompletedValue(staging_buffer->d3d12_fence.fence) < staging_buffer->d3d12_fence.fence_value) {
         // TODO: replace with WaitForSingleObject
     }
 
@@ -955,6 +958,51 @@ static void R_InitDynamicUniformBuffers()
 		ubo_write.dstSet = ubo_descriptor_sets[i];
 		vkUpdateDescriptorSets(vulkan_globals.device, 1, &ubo_write, 0, NULL);
 	}
+
+#ifdef D3D12_ENABLED
+
+    D3D12_RESOURCE_DESC d3d12_buffer_create_info;
+    memset(&d3d12_buffer_create_info, 0, sizeof(d3d12_buffer_create_info));
+    d3d12_buffer_create_info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d3d12_buffer_create_info.Width = (UINT64) current_dyn_uniform_buffer_size;
+    d3d12_buffer_create_info.Height = 1;
+    d3d12_buffer_create_info.DepthOrArraySize = 1;
+    d3d12_buffer_create_info.MipLevels = 1;
+    d3d12_buffer_create_info.SampleDesc.Count = 1;
+    d3d12_buffer_create_info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    D3D12_HEAP_PROPERTIES heap_properties;
+    memset(&heap_properties, 0, sizeof(heap_properties));
+    heap_properties.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    for (i = 0; i < NUM_DYNAMIC_BUFFERS; ++i)
+    {
+        if (FAILED(vulkan_globals.d3d12_device->lpVtbl->CreateCommittedResource(vulkan_globals.d3d12_device, &heap_properties, D3D12_HEAP_FLAG_NONE, &d3d12_buffer_create_info, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, &dyn_uniform_buffers[i].d3d12_buffer)))
+            Sys_Error("CreateCommittedResource failed");
+
+        if (FAILED(dyn_uniform_buffers[i].d3d12_buffer->lpVtbl->Map(dyn_uniform_buffers[i].d3d12_buffer, 0, NULL, &dyn_uniform_buffers[i].d3d12_data)))
+            Sys_Error("Map failed");
+
+        D3D12_CONSTANT_BUFFER_VIEW_DESC desc;
+        memset(&desc, 0, sizeof(desc));
+
+        desc.BufferLocation = dyn_uniform_buffers[i].d3d12_buffer->lpVtbl->GetGPUVirtualAddress(dyn_uniform_buffers[i].d3d12_buffer);
+        desc.SizeInBytes = MAX_UNIFORM_ALLOC;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = vulkan_globals.d3d12_dheap_global.cpu_handle;
+        cpuHandle.ptr += vulkan_globals.d3d12_dheap_global_next_free_index * vulkan_globals.d3d12_dheap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV];
+        D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle = vulkan_globals.d3d12_dheap_global.gpu_handle;
+        gpuHandle.ptr += vulkan_globals.d3d12_dheap_global_next_free_index * vulkan_globals.d3d12_dheap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV];
+        vulkan_globals.d3d12_dheap_global_next_free_index++;
+
+        vulkan_globals.d3d12_device->lpVtbl->CreateConstantBufferView(vulkan_globals.d3d12_device, &desc, cpuHandle);
+
+        dyn_uniform_buffers[i].d3d12_cbv_cpu = cpuHandle;
+        dyn_uniform_buffers[i].d3d12_cbv_gpu = gpuHandle;
+    }
+
+   
+#endif
 }
 
 /*
@@ -998,6 +1046,25 @@ static void R_InitFanIndexBuffer()
 	if (err != VK_SUCCESS)
 		Sys_Error("vkBindBufferMemory failed");
 
+#ifdef D3D12_ENABLED
+    D3D12_RESOURCE_DESC d3d12_buffer_create_info;
+    memset(&d3d12_buffer_create_info, 0, sizeof(d3d12_buffer_create_info));
+    d3d12_buffer_create_info.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    d3d12_buffer_create_info.Width = (UINT64) bufferSize;
+    d3d12_buffer_create_info.Height = 1;
+    d3d12_buffer_create_info.DepthOrArraySize = 1;
+    d3d12_buffer_create_info.MipLevels = 1;
+    d3d12_buffer_create_info.SampleDesc.Count = 1;
+    d3d12_buffer_create_info.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    D3D12_HEAP_PROPERTIES heap_properties;
+    memset(&heap_properties, 0, sizeof(heap_properties));
+    heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    if (FAILED(vulkan_globals.d3d12_device->lpVtbl->CreateCommittedResource(vulkan_globals.d3d12_device, &heap_properties, D3D12_HEAP_FLAG_NONE, &d3d12_buffer_create_info, D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, &vulkan_globals.d3d12_fan_index_buffer)))
+        Sys_Error("CreateCommittedResource failed");
+#endif
+
 	{
 		VkBuffer staging_buffer;
 		VkCommandBuffer command_buffer;
@@ -1019,6 +1086,26 @@ static void R_InitFanIndexBuffer()
 		region.size = bufferSize;
 		vkCmdCopyBuffer(command_buffer, staging_buffer, vulkan_globals.fan_index_buffer, 1, &region);
 	}
+
+#ifdef D3D12_ENABLED
+    {
+        ID3D12Resource* staging_buffer;
+        ID3D12GraphicsCommandList* command_buffer;
+        int staging_offset;
+        int current_index = 0;
+        int i;
+        uint16_t * staging_memory = (uint16_t*) R_StagingAllocate_D3D12(bufferSize, 1, &command_buffer, &staging_buffer, &staging_offset);
+
+        for (i = 0; i < FAN_INDEX_BUFFER_SIZE / 3; ++i)
+        {
+            staging_memory[current_index++] = 0;
+            staging_memory[current_index++] = 1 + i;
+            staging_memory[current_index++] = 2 + i;
+        }
+
+        command_buffer->lpVtbl->CopyBufferRegion(command_buffer, vulkan_globals.d3d12_fan_index_buffer, 0, staging_buffer, staging_offset, bufferSize);
+    }
+#endif
 }
 
 /*

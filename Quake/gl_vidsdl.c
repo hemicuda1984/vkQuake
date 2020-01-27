@@ -200,13 +200,13 @@ ID3D12Resource *                    d3d12_depth_buffer = NULL;
 
 UINT                                d3d12_dheap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES];
 
-descriptor_heap_data                d3d12_dheap_swapchain_image_views;
+d3d12_descriptor_heap_data                d3d12_dheap_swapchain_image_views;
 ID3D12Resource*						d3d12_swapchain_images[MAX_SWAP_CHAIN_IMAGES];
 D3D12_CPU_DESCRIPTOR_HANDLE         d3d12_swapchain_images_views[MAX_SWAP_CHAIN_IMAGES];
-descriptor_heap_data                d3d12_dheap_depth_buffer_heap;
+d3d12_descriptor_heap_data                d3d12_dheap_depth_buffer_heap;
 D3D12_CPU_DESCRIPTOR_HANDLE         d3d12_depth_buffer_view;
 
-descriptor_heap_data                d3d12_dheap_color_buffer_heap;
+d3d12_descriptor_heap_data                d3d12_dheap_color_buffer_heap;
 D3D12_CPU_DESCRIPTOR_HANDLE         d3d12_color_buffers_view[NUM_COLOR_BUFFERS];
 #endif
 
@@ -627,7 +627,7 @@ void VID_Lock (void)
 //
 //==============================================================================
 
-void CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE type, UINT descriptor_count, descriptor_heap_data * out_data)
+void CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE type, UINT descriptor_count, d3d12_descriptor_heap_data * out_data)
 {
     HRESULT hr;
     D3D12_DESCRIPTOR_HEAP_DESC descriptor_heap_desc;
@@ -787,9 +787,23 @@ static void GL_InitInstance( void )
     if (hr != S_OK)
         Sys_Error("CreateCommandQueue failed");
 
+    hr = d3d12_device->lpVtbl->CreateFence(d3d12_device, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void**) &vulkan_globals.d3d12_queue_fence.fence);
+    if (hr != S_OK)
+        Sys_Error("CreateFence failed");
+    vulkan_globals.d3d12_queue_fence.fence_value = 0;
+
+    hr = d3d12_device->lpVtbl->CreateFence(d3d12_device, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void**) &vulkan_globals.d3d12_copy_queue_fence.fence);
+    if (hr != S_OK)
+        Sys_Error("CreateFence failed");
+    vulkan_globals.d3d12_copy_queue_fence.fence_value = 0;
+
     hr = CreateDXGIFactory(&IID_IDXGIFactory4, (void**) &dxgi_factory);
     if (hr != S_OK)
         Sys_Error("Couldn't create DXGI factory");
+
+    CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1024, &vulkan_globals.d3d12_dheap_global);
+    vulkan_globals.d3d12_dheap_global_next_free_index = 0;
+
 #endif
 }
 
@@ -1949,8 +1963,8 @@ static void GL_CreateFrameBuffers( void )
 
     // TODO: move somewhere else
     // TODO: manage space
-    CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1024, &vulkan_globals.d3d12_dheap_global);
-    vulkan_globals.d3d12_dheap_global_next_free_index = 0;
+    //CreateDescriptoHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1024, &vulkan_globals.d3d12_dheap_global);
+    //vulkan_globals.d3d12_dheap_global_next_free_index = 0;
 #endif
 }
 

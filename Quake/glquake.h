@@ -116,7 +116,12 @@ typedef struct {
     ID3D12DescriptorHeap * descriptor_heap;
     D3D12_CPU_DESCRIPTOR_HANDLE cpu_handle;
     D3D12_GPU_DESCRIPTOR_HANDLE gpu_handle;
-} descriptor_heap_data;
+} d3d12_descriptor_heap_data;
+
+typedef struct {
+    ID3D12Fence * fence;
+    UINT64 fence_value;
+} d3d12_fence_data;
 #endif
 
 typedef struct
@@ -142,6 +147,9 @@ typedef struct
     ID3D12Device*                       d3d12_device;
     ID3D12CommandQueue*                 d3d12_copy_queue;
     ID3D12CommandQueue*                 d3d12_queue;
+    d3d12_fence_data                    d3d12_copy_queue_fence;
+    d3d12_fence_data                    d3d12_queue_fence;
+
     ID3D12GraphicsCommandList*          d3d12_command_list;
     ID3D12PipelineState*                d3d12_current_pipeline;
     DXGI_FORMAT                         dxgi_swap_chain_format;
@@ -182,7 +190,7 @@ typedef struct
     ID3D12PipelineState*                d3d12_showtris_depth_test_pipeline;
     ID3D12RootSignature*                d3d12_showtris_pipeline_layout;
 
-    descriptor_heap_data                d3d12_dheap_global;
+    d3d12_descriptor_heap_data                d3d12_dheap_global;
     uint32_t                            d3d12_dheap_global_next_free_index;
 
     uint32_t                            d3d12_dheap_increment_size[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES];

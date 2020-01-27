@@ -1168,7 +1168,9 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
         d3d12_command_buffer->lpVtbl->CopyTextureRegion(d3d12_command_buffer, &dst, 0, 0, 0, &src, NULL);
     }
 
-    D3D12_RESOURCE_BARRIER barrier;
+    glt->d3d12_image_state = D3D12_RESOURCE_STATE_COPY_DEST;
+
+    /*D3D12_RESOURCE_BARRIER barrier;
     memset(&barrier, 0, sizeof(barrier));
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = glt->d3d12_image;
@@ -1176,7 +1178,7 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
-    d3d12_command_buffer->lpVtbl->ResourceBarrier(d3d12_command_buffer, 1, &barrier);
+    d3d12_command_buffer->lpVtbl->ResourceBarrier(d3d12_command_buffer, 1, &barrier);*/
 #endif
 }
 
